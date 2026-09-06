@@ -1,0 +1,325 @@
+---
+title: "Sophia_Colour"
+author: "Andrew J. Temple"
+date: "6/23/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load packages
+
+```{r}
+library(devtools)
+library(recolorize)
+library(colorspace)
+library(tidyverse)
+library(parallel)
+library(grid)
+library(ggimage)
+library(colordistance)
+library(ape)
+library(vegan)
+library(cowplot)
+```
+
+Working Directory
+
+```{r}
+# Set working directory to the repository root before running
+# setwd("path/to/batoid-research-bias")
+```
+
+
+# Image recolouration
+
+Get images and load them
+
+```{r}
+imgs <- data.frame(file = list.files(
+  "Batoid_Images/All_Images",  # Note: images not included in repo (too large/copyrighted), 
+  pattern = "\\.png$", full.names = TRUE))
+imgs$page <- as.numeric(str_extract(basename(imgs$file), "\\d+(?=\\.png$)"))
+```
+
+## testing phase
+
+recolourise the species and check setting to see what seems most appropriate.
+
+```{r}
+recolours <- list()
+
+recolours <- mclapply(1:nrow(imgs), function(i) {
+  fit1Q <- recolorize(imgs$file[i], method = "histogram", bins = 10, plotting = FALSE, color_space = "Lab",
+                      lower = c(0.95, 0.95, 0.95), upper = c(1, 1, 1))
+  fit2Q <- recluster(fit1Q, cutoff = 12, plot_hclust = FALSE, plot_final = FALSE)
+  fit3Q <- thresholdRecolor(fit2Q, pct = 0.01, plotting = FALSE)
+  fit3Q$page <- imgs$page[i]
+  return(fit3Q)
+}, mc.cores = detectCores() - 2)  # Use all but two cores
+
+rm(imgs)
+```
+
+Save recoloured images
+
+```{r}
+invisible( ## to suppress print outs
+  mclapply(1:length(recolours), function(i) {
+    img_array <- recoloredImage(recolours[[i]])  # e.g., a [height, width, 3] array
+    
+    # Convert to raster object
+    img_raster <- as.raster(img_array)
+    
+    # Create filename
+    filename <- sprintf("Batoid_Images/Recoloured/recolored_page%d.png", recolours[[i]]$page)
+    
+    # Save image
+    png(filename, width = dim(img_array)[2], height = dim(img_array)[1], bg = "transparent")
+    grid.raster(img_raster)
+    dev.off()
+    }, mc.cores = detectCores() - 2)  # Use all but two cores
+)
+```
+
+
+
+# Image Constrast
+
+Calculate weighted achromatic and chromatic contrast
+
+```{r}
+## Build function to calculate weighted contrast
+#compute_weighted_contrast <- function(contrast_matrix, weights) {
+#  weighted_sum <- 0
+#  weight_total <- 0
+
+#  if (length(color_props) > 1) {
+#  for (i in 1:(length(weights) - 1)) {
+#    for (j in (i + 1):length(weights)) {
+#      weight <- weights[i] * weights[j]
+#      delta <- contrast_matrix[i, j]
+#      weighted_sum <- weighted_sum + (delta * weight)
+#      weight_total <- weight_total + weight
+#    }
+#  }
+#  }
+  
+#  if (weight_total > 0) {
+#    return(weighted_sum / weight_total)
+#  } else {
+#    return(0)
+#  }
+#}
+
+compute_weighted_contrast <- function(contrast_matrix, weights) {
+  n <- length(weights)
+  if (n == 0) return(0)
+  
+  weighted_sum <- 0
+  for (i in 1:n) {
+    for (j in 1:n) {
+      weighted_sum <- weighted_sum + weights[i] * weights[j] * contrast_matrix[i, j]
+    }
+  }
+  
+  return(weighted_sum)  # denominator is always 1
+}
+
+
+## Initialize results list
+chr_contrast <- list()
+achr_contrast <- list()
+
+## build loop to run it over all species
+for (i in 1:length(recolours)) {
+  
+  # Extract LAB cluster centers and pixel labels from fit3Q, this will still come in RGB format 
+  rgb_centers <- recolours[[i]]$centers  # Each row = a color cluster in LAB
+  labels <- recolours[[i]]$pixel_assignments  # Each pixel’s cluster assignment
+  
+  # Convert to proper Lab values
+  lab_colors <- convertColor(rgb_centers, from = "sRGB", to = "Lab", scale.in = 1)
+
+  # Get color proportions
+  color_counts <- table(factor(labels, levels = seq_len(nrow(lab_colors))))
+  color_props <- as.numeric(color_counts) / sum(color_counts)
+  
+  # Achromatic Contrast (L*)
+  L_vals <- lab_colors[, 1, drop = FALSE]  # Just the L* channel
+  achromatic_matrix <- as.matrix(dist(L_vals))
+  
+  # Chromatic Contrast (a*, b*)
+  ab_vals <- lab_colors[, 2:3, drop = FALSE]  # a* and b* only
+  chromatic_matrix <- as.matrix(dist(ab_vals))
+  
+  # Compute final scores
+  weighted_achromatic <- compute_weighted_contrast(achromatic_matrix, color_props)
+  weighted_chromatic <- compute_weighted_contrast(chromatic_matrix, color_props)
+  
+  # Store results
+  chr_contrast[[i]] <- weighted_chromatic
+  achr_contrast[[i]] <- weighted_achromatic
+#}, mc.cores = detectCores() - 2)  # Use all but two cores
+}
+
+rm(rgb_centers, labels, lab_colors, color_counts, color_props, L_vals, chromatic_matrix, ab_vals, achromatic_matrix,
+   weighted_achromatic, weighted_chromatic, i)
+
+plot(chr_contrast, achr_contrast,
+     xlab = "Chromatic contrast",
+     ylab = "Achromatic contrast")
+```
+
+build data frame
+
+```{r}
+rc_img <- do.call(rbind, Map(data.frame, chr=chr_contrast, achr=achr_contrast))
+rc_img$og_file <- data.frame(file = list.files(
+  "Batoid_Images/All_Images"  # Note: images not included in repo (too large/copyrighted),
+  pattern = "\\.png$", full.names = TRUE))
+rc_img$rc_file <- list.files(
+  "Batoid_Images/Recoloured", 
+  pattern = "\\.png$", full.names = TRUE)
+rc_img$page <- as.numeric(str_extract(basename(rc_img$rc_file), "\\d+(?=\\.png$)"))
+rm(achr_contrast, chr_contrast)
+```
+
+plot in ggplot
+
+```{r}
+p01 <- ggplot(rc_img, aes(x = as.numeric(achr), y = as.numeric(chr))) +
+  #geom_point() +
+  geom_image(aes(image = rc_file), size = 0.05) +
+  scale_x_continuous(breaks = c(0, 5, 10, 15, 20)) +
+  scale_y_continuous(breaks = c(0, 5, 10, 15)) +
+  xlab("Weighted Achromatic Contrast") +
+  ylab("Weighted Chromatic Contrast") +
+  coord_fixed() + 
+  theme_bw() +
+  theme(text = element_text(size = 9),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+#p01
+
+#ggsave("contrast_12.png", p01, units = "cm", height = 12, width = 15, dpi = 600)
+```
+
+Finished with recoloured images, so remove them to save space
+
+```{r}
+rm(recolours)
+```
+
+
+# Colour uniqueness
+
+create hierarchical tree of colour distance
+
+```{r}
+# create colour distance matrix
+cdm <- imageClusterPipeline(rc_img$rc_file, ## match options from recolourize as much as possible
+                            cluster.method = "hist", hist.bin = 5, 
+                            lower = c(0.95, 0.95, 0.95), upper = c(1, 1, 1),
+                            color.space = "lab", from = "sRGB", 
+                            ref.white = "D65",
+                            sample.size = FALSE)
+
+# create tree and plot
+tree <- nj(as.dist(cdm))
+plot(tree, direction = "upwards", cex = 0.5)
+```
+
+NMDS to measure uniqueness
+
+```{r}
+## Run NDMS with different numbers of dimensions, inspect stress and select number to proceed with
+stress_vals <- numeric()
+
+for (k in 1:6) {
+  set.seed(2009)
+  fit <- metaMDS(as.dist(cdm), k = k, trymax = 100, trace = FALSE)
+  stress_vals[k] <- fit$stress
+  rm(fit)
+}
+
+plot(1:6, stress_vals, type = "b", xlab = "Dimensions (k)", ylab = "Stress", main = "Stress vs Dimensions")
+
+# 3 dimensions takes stress to <0.05, 1 (0.229), 2 (0.075), 3 (0.035)
+# Proceed with 3 dimensions
+
+nmds_result <- metaMDS(as.dist(cdm), k = 3, trymax = 100)
+
+# Check final stress
+nmds_result$stress
+# 0.035
+```
+
+Calculate relative uniqueness as distance from centroid
+
+```{r}
+# Extract NMDS site scores (coordinates)
+scores_df <- as.data.frame(scores(nmds_result, display = "sites"))
+
+# Calculate centroid
+centroid <- colMeans(scores_df)
+
+# Calculate Euclidean distance from centroid for each point
+uniqueness <- apply(scores_df, 1, function(x) sqrt(sum((x - centroid)^2)))
+
+# Add NMDS and uniqueness (distance from centroid) to data frame
+rc_img <- rc_img %>%
+  cbind(scores_df, uniqueness)
+
+rownames(rc_img) <- NULL
+
+rm(scores_df, centroid, uniqueness, cdm, nmds_result)
+```
+
+Plot colour uniqueness
+
+```{r}
+p02 <- 
+  rc_img %>% 
+  ggplot(aes(x = as.numeric(NMDS1), y = as.numeric(NMDS2))) +
+  #geom_point() +
+  geom_image(aes(image = rc_file), size = 0.05) +
+  geom_text(x = -Inf, y = -Inf, label = "Stress = 0.0349",
+           hjust = -0.1, vjust = -0.5, size = 9/.pt) +
+  scale_x_continuous(limits = c(-40, 40), breaks = c(-40, -20, 0, 20, 40)) +
+  scale_y_continuous(limits = c(-26, 26), breaks = c(-20, -10, 0, 10, 20)) +
+  xlab("NMDS1") +
+  ylab("NMDS2") +
+  coord_fixed() +
+  theme_bw() +
+  theme(text = element_text(size = 10),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+p02
+
+#ggsave("uniqueness.png", p02, units = "cm", height = 10, width = 15, dpi = 600)
+```
+
+
+
+# Save Outputs
+
+Save colour analyses data outputs
+
+```{r}
+write.csv(rc_img %>% dplyr::select(-c(og_file, rc_file)), "Colour_Data.csv", row.names = FALSE)
+```
+
+Plot combined colour plots
+
+```{r}
+p03 <- ggdraw() +
+  draw_plot(plot_grid(p01, p02, ncol = 1), x = 0, y = 0, width = 1, height = 1) +
+  draw_plot_label(label = c("a", "b"), size = 10,
+                  x = c(0.005, 0.005), y = c(.995, 0.495))
+p03
+
+#ggsave("colour_plot.png", p03, units = "cm", height = 22, width = 15.9, dpi = 600, bg = "white")
+```

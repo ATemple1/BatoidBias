@@ -1,0 +1,179 @@
+---
+title: "Combining_Literature"
+author: "Andrew J. Temple"
+date: "3/13/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+wd and libraries
+
+```{r}
+# Set working directory to the repository root before running
+# setwd("path/to/batoid-research-bias")
+library(tidyverse)
+#library(progress)
+library(doParallel)
+library(foreach)
+library(stringi)
+```
+
+## Load and clean literature search outputs
+
+```{r}
+# Read all files and combine them into one data frame
+comb_lit <- read.csv("Literature_Search/lit_return_filtered.csv")
+```
+
+Ensure no duplicate rows
+
+```{r}
+comb_lit <- comb_lit %>%
+  distinct()
+```
+
+Re-search to double check the returns and also to identify results that were based on Index Keywords - we may or may not want to filter to only those that aren't based on index keywords...
+
+```{r}
+synonyms <- read.csv("rl_synonyms.csv")
+
+## need to change terms to the following format "a|b|c" rather than "a" OR "b" OR "c"
+synonyms_check <- synonyms %>%
+  mutate(terms = str_remove_all(synonyms, '"')) %>%
+  mutate(terms = str_replace_all(terms, " OR ", "|"))
+
+## unlist the make the full string
+synonyms_check <- paste(unlist(synonyms_check$terms), collapse = "|")
+
+## convert title, abstract and keyword columns lower case, also the synonym search term
+## ensures the check is not case sensitive
+comb_lit <- comb_lit %>%
+  mutate(across(c("Title", "Abstract", "Author_Keywords", "Index_Keywords"), 
+                 ~ stri_trans_general(., "Latin-ASCII"))) %>% ## deals with letters like ö
+  mutate(across(all_of(c("Title", "Abstract", "Author_Keywords", "Index_Keywords")), 
+                 ~ ifelse(is.na(.), NA, tolower(iconv(., from = "", to = "UTF-8")))))
+## converting to UTF-8 is required to avoid some issues with tolower() and species characters
+
+synonyms_check <- tolower(synonyms_check)
+
+
+## check search terms exist in title, abstract or keywords (author and index)
+## We need to run this is parallel otherwise it will take a very long time!
+num_cores <- detectCores() - 2  # Use available cores minus two
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# create column for results
+comb_lit$contains_terms <- logical(nrow(comb_lit))  
+
+# Parallel loop using foreach
+results <- foreach(i = 1:nrow(comb_lit), .combine = "c", .packages = "stringr") %dopar% {
+  
+  row_values <- unlist(comb_lit[i, c("Title", "Abstract", "Author_Keywords", "Index_Keywords")], 
+                       use.names = FALSE)
+  row_values <- row_values[!is.na(row_values)]  # Remove NAs
+  
+  any(str_detect(row_values, synonyms_check))  # Return TRUE/FALSE for each row
+}
+
+## Assign results back to the data frame
+comb_lit$contains_terms <- results
+
+## We checked the FALSE returns (n = 28)
+## a quick look does suggest they do look like false returns based on our search term
+## they can probably be removed
+
+## check again to look only title, abstract or author keywords
+comb_lit$contains_terms_TAK <- logical(nrow(comb_lit))  
+
+# Parallel loop using foreach
+results <- foreach(i = 1:nrow(comb_lit), .combine = "c", .packages = "stringr") %dopar% {
+  
+  row_values <- unlist(comb_lit[i, c("Title", "Abstract", "Author_Keywords")], use.names = FALSE)
+  row_values <- row_values[!is.na(row_values)]  # Remove NAs
+  
+  any(str_detect(row_values, synonyms_check))  # Return TRUE/FALSE for each row
+}
+
+## Assign results back to the data frame
+comb_lit$contains_terms_TAK <- results
+## We checked the FALSE returns (n = 608) 
+
+# Stop cluster
+stopCluster(cl)
+
+## remove unneeded objects
+rm(cl, num_cores, results)
+
+## save
+#write.csv(comb_lit, "Literature_Search/Final_lit.csv", row.names = FALSE)
+```
+
+
+# Full returns including Index
+
+## filter 
+
+drop false returns
+
+```{r}
+filter_lit <- comb_lit %>%
+  filter(contains_terms_TAK == TRUE)
+
+## dropped 608
+```
+
+## assign number of results by species
+
+create loop to search synonyms and count returns by species
+
+```{r}
+## make the species list
+species <- synonyms %>% 
+  select(sci_name) %>% 
+  mutate(sci_name = str_remove_all(sci_name, '"'))
+
+## TEST 1
+num_cores <- parallel::detectCores() - 2  # Leave two cores free
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Preprocess the literature fields once
+lit_fields <- tolower(
+  do.call(paste, c(filter_lit[, c("Title", "Abstract", "Author_Keywords")], sep = " "))
+)
+
+start_time <- Sys.time()
+
+# Run in parallel
+counts <- foreach(i = 1:nrow(species), .combine = c, .packages = "stringr") %dopar% {
+  # Build regex from synonyms (cleaned)
+  terms <- gsub('"', '', synonyms[i, "synonyms"])
+  terms <- tolower(gsub(" OR ", "|", terms))
+
+  # Count matches using vectorized grepl over preprocessed text
+  sum(grepl(terms, lit_fields, ignore.case = FALSE))
+}
+
+end_time <- Sys.time()
+cat("Run took", round(difftime(end_time, start_time, units = "mins"), 2), "minutes\n")
+stopCluster(cl)
+## Time taken = 10.33 mins
+## time taken 1,000 = 308.75
+## time taken 10,000 = 3386.09
+
+species <- species %>%
+  mutate(counts = counts)
+
+write.csv(species, "species_counts.csv", row.names = FALSE)
+
+## remove unneeded objects
+rm(cl, end_time, lit_fields, num_cores, start_time)
+```
+
+

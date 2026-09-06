@@ -1,0 +1,1661 @@
+---
+title: "Sophia_Analysis"
+output: html_document
+date: "2025-07-03"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+
+```{r}
+library(tidyverse)
+library(dagitty)
+library(ape)
+library(car)
+library(nnet)
+library(brms)
+library(tidybayes)
+library(effectsize)
+library(ggtree)
+library(cowplot)
+library(emmeans)
+library(EValue)
+```
+
+Set working directory
+```{r}
+# Set working directory to the repository root before running
+# setwd("path/to/batoid-research-bias")
+```
+
+# Data 
+
+## build data
+
+load data
+
+```{r}
+d <- read.csv("Data_Merged.csv")
+```
+
+check for data class
+
+```{r}
+sapply(d, class)
+
+# change characters to factors and integers to numeric
+d <- d %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(c("min_depth", "max_depth", "med_depth", "year", "size", "range_km2", "chr", "achr", "uniqueness", "sum_GDP_bil", "papers"), as.numeric))
+```
+
+transform highly skewed numeric variables
+
+```{r}
+hist(d$min_depth)
+hist(d$max_depth)
+hist(d$size)
+hist(d$year)
+hist(d$range_km2)
+hist(d$sum_GDP_bil)
+hist(d$chr)
+hist(d$achr)
+hist(d$uniqueness)
+
+d <- d %>%
+  mutate(min_depth = log10(min_depth+1)) %>%
+  mutate(max_depth = log10(max_depth+1)) %>%
+  mutate(size = log10(size+1)) %>%
+  mutate(range_km2 = log10(range_km2+1)) %>%
+  mutate(wsum_GDP_bil = log10(wsum_GDP_bil+1)) %>%
+  mutate(sum_GDP_bil = log10(sum_GDP_bil+1)) %>%
+  mutate(achr = log10(achr+1)) %>%
+  mutate(chr = log10(chr+1)) %>%
+  dplyr::select(c("class":"max_depth", "year", "size", "range_km2", "chr", "achr", "uniqueness":"shape", "med_lat"))
+```
+
+impute missing data
+
+```{r}
+## impute missing with mean for numeric and mode for factor
+mode_value <- function(x) {
+  ux <- na.omit(x)
+  if (length(ux) == 0) return(NA)
+  ux[which.max(tabulate(match(ux, ux)))]
+}
+
+d_imputed <- d %>%
+  group_by(order) %>%
+  mutate(
+    across(where(is.numeric), ~ coalesce(., mean(., na.rm = TRUE))),
+    across(where(is.factor), ~ {
+      m <- mode_value(.)
+      factor(coalesce(as.character(.), as.character(m)), levels = levels(.))
+    })
+  ) %>%
+  ungroup()
+```
+
+Set initial reference levels for factor variables
+
+```{r}
+d_imputed$pattern <- relevel(factor(d_imputed$pattern), ref = "None")
+d_imputed$shape <- relevel(factor(d_imputed$shape), ref = "Disc")
+d_imputed$status <- relevel(factor(d_imputed$status), ref = "LC")
+```
+
+## Phylogeny 
+
+Build phylogeny - in our case we will use taxonomy because a good complete phylogeny is not easily available!
+
+```{r}
+# Build tree from taxonomy
+tax_tree <- as.phylo.formula(~ class/order/family/genus/sci_name, 
+                             data = d)
+
+## make tree ultametric (i.e. from class to species is equal length regardless of number of splits)
+tax_tree <- compute.brlen(tax_tree, method = "Grafen")
+
+plot(tax_tree, type = "fan", show.tip.label = FALSE)
+
+# Create phylogenetic covariance
+A <- ape::vcv(tax_tree)
+```
+
+
+
+# DAG set up
+
+## DAG
+
+Set up the hypothesised DAG. We include colour phenotype as a latent because it controls pattern and contrast and there is no logical ordering of causality between them - though they are certainly correlated.
+
+```{r}
+dag <- dagitty(
+"dag {
+contrast []
+depth []
+sum_GDP_bil []
+papers [outcome]
+pattern []
+phenotype [latent]
+range_km2 []
+shape []
+size []
+status []
+uniqueness []
+year []
+contrast -> papers
+contrast -> uniqueness
+depth -> papers
+depth -> phenotype
+depth -> range_km2
+depth -> status
+depth -> uniqueness
+depth -> year
+sum_GDP_bil -> papers
+sum_GDP_bil -> status
+sum_GDP_bil -> year
+pattern -> papers
+pattern -> uniqueness
+phenotype -> contrast
+phenotype -> pattern
+range_km2 -> sum_GDP_bil
+range_km2 -> papers
+range_km2 -> status
+range_km2 -> year
+shape -> depth
+shape -> papers
+shape -> phenotype
+shape -> range_km2
+shape -> size
+size -> depth
+size -> papers
+size -> range_km2
+size -> status
+size -> year
+status -> papers
+uniqueness -> papers
+year -> papers
+year -> status
+}
+")
+
+plot(graphLayout(dag))
+```
+
+
+## Check for and test conditional independencies
+
+Identify at conditional independencies. 
+
+```{r}
+iCI <- impliedConditionalIndependencies(dag)
+print(impliedConditionalIndependencies(dag))
+```
+
+These should ideally hold with the data, if not we may need to reconsider the DAG structure
+
+Test against a correct p-value for multiple comparisons and a standardised effect size threshold of 0.2 (we dont want to include links that are essentially meaningless)
+
+0.05/44 = 0.001136364 = p value threshold under bonferonni
+
+```{r}
+## use eta_squared(x, partial = TRUE) to get partial R2
+#cntr _||_ rn_2 | dpth, shap
+anova(lm(chr ~  
+           scale(achr) + scale(min_depth) + scale(max_depth) + shape + order + family + 
+           scale(range_km2),
+         data = d_imputed))
+anova(lm(achr ~ 
+           scale(chr) + scale(min_depth) + scale(max_depth) + shape + order + family +
+           scale(range_km2),
+         data = d_imputed))
+
+#cntr _||_ size | dpth, shap
+anova(lm(chr ~  
+           scale(achr) + scale(min_depth) + scale(max_depth) + shape + order + family +
+           scale(size),
+         data = d_imputed))
+anova(lm(achr ~  
+           scale(chr) + scale(min_depth) + scale(max_depth) + shape + order + family +
+           scale(size),
+         data = d_imputed))
+
+#cntr _||_ stts | dpth, rn_2, size
+anova(lm(chr ~ 
+           scale(achr) + scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+           status,
+         data = d_imputed))
+anova(lm(achr ~ 
+           scale(chr) + scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+           status,
+         data = d_imputed))
+
+#cntr _||_ stts | dpth, shap
+anova(lm(chr ~
+           scale(achr) + scale(min_depth) + scale(max_depth) + shape + order + family + 
+           status,
+         data = d_imputed))
+anova(lm(achr ~
+           scale(chr) + scale(min_depth) + scale(max_depth) + shape + order + family + 
+           status,
+         data = d_imputed))
+
+#cntr _||_ w_GD | rn_2
+anova(lm(chr ~  
+           scale(achr) + scale(range_km2) + order + family + 
+           scale(sum_GDP_bil),
+         data = d_imputed))
+anova(lm(achr ~  
+           scale(chr) + scale(range_km2) + order + family + 
+           scale(sum_GDP_bil),
+         data = d_imputed))
+
+#cntr _||_ w_GD | dpth, shap
+anova(lm(chr ~ 
+           scale(achr) + scale(min_depth) + scale(max_depth) + shape + order + family + 
+           scale(sum_GDP_bil),
+         data = d_imputed))
+anova(lm(achr ~ 
+           scale(chr) + scale(min_depth) + scale(max_depth) + shape + order + family + 
+           scale(sum_GDP_bil),
+         data = d_imputed))
+
+#cntr _||_ year | dpth, rn_2, size
+anova(lm(chr ~ 
+           scale(achr) + scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+           scale(year),
+         data = d_imputed))
+anova(lm(achr ~ 
+           scale(chr) + scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+           scale(year),
+         data = d_imputed))
+
+#cntr _||_ year | dpth, shap
+anova(lm(chr ~
+           scale(achr) + scale(min_depth) + scale(max_depth) + shape + order + family +
+           scale(year),
+         data = d_imputed))
+anova(lm(achr ~
+           scale(chr) + scale(min_depth) + scale(max_depth) + shape + order + family +
+           scale(year),
+         data = d_imputed))
+
+#dpth _||_ w_GD | rn_2
+anova(lm(min_depth ~  
+           scale(max_depth) + scale(range_km2) + order + family + 
+           scale(sum_GDP_bil),
+         data = d_imputed))
+anova(lm(max_depth ~  
+           scale(min_depth) + scale(range_km2) + order + family + 
+           scale(sum_GDP_bil),
+         data = d_imputed))
+
+#pttr _||_ rn_2 | dpth, shap
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + shape + order + family + 
+                 scale(range_km2),
+               data = d_imputed))
+
+#pttr _||_ size | dpth, shap
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + shape + order + family + 
+                 scale(size),
+               data = d_imputed))
+
+#pttr _||_ stts | dpth, rn_2, size
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+                 status,
+               data = d_imputed))
+
+#pttr _||_ stts | dpth, shap
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + shape + order + family +
+                 status,
+               data = d_imputed))
+
+#pttr _||_ w_GD | rn_2
+Anova(multinom(pattern ~ 
+                 scale(range_km2) + order + family +
+                 scale(sum_GDP_bil),
+               data = d_imputed))
+
+#pttr _||_ w_GD | dpth, shap
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + shape + order + family +
+                 scale(sum_GDP_bil),
+               data = d_imputed))
+
+#pttr _||_ year | dpth, rn_2, size
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family + 
+                 scale(year),
+               data = d_imputed))
+
+#pttr _||_ year | dpth, shap
+Anova(multinom(pattern ~ 
+                 scale(min_depth) + scale(max_depth) + shape + order + family +
+                 scale(year),
+               data = d_imputed))
+
+#rn_2 _||_ unqn | cntr, dpth, pttr
+anova(lm(range_km2 ~ 
+           scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+           scale(uniqueness),
+         data = d_imputed))
+
+#rn_2 _||_ unqn | dpth, shap
+summary(lm(range_km2 ~ 
+             scale(min_depth) + scale(max_depth) + shape + order + family +
+             scale(uniqueness),
+           data = d_imputed))
+
+#shap _||_ stts | dpth, rn_2, size
+Anova(multinom(shape ~ 
+                 scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+                 status,
+               data = d_imputed))
+
+#shap _||_ unqn | cntr, dpth, pttr
+Anova(multinom(shape ~ 
+                 scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+                 scale(uniqueness),
+               data = d_imputed))
+
+#shap _||_ w_GD | rn_2
+Anova(multinom(shape ~ 
+                 scale(range_km2) + order + family +
+                 scale(sum_GDP_bil),
+               data = d_imputed))
+
+#shap _||_ year | dpth, rn_2, size
+Anova(multinom(shape ~ 
+                 scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+                 scale(year),
+               data = d_imputed))
+
+#size _||_ unqn | cntr, dpth, pttr
+summary(lm(size ~ 
+             scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+             scale(uniqueness),
+           data = d_imputed))
+
+#size _||_ unqn | dpth, shap
+summary(lm(size ~ 
+             scale(min_depth) + scale(max_depth) + shape + order + family + 
+             scale(uniqueness),
+           data = d_imputed))
+
+#size _||_ w_GD | rn_2
+summary(lm(size ~ 
+             scale(range_km2) + order + family +
+             scale(sum_GDP_bil),
+           data = d_imputed))
+
+#stts _||_ unqn | cntr, dpth, pttr
+Anova(multinom(status ~ 
+                 scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+                 scale(uniqueness),
+               data = d_imputed))
+
+#stts _||_ unqn | dpth, shap
+Anova(multinom(status ~ 
+                 scale(min_depth) + scale(max_depth) + shape + order + family +
+                 scale(uniqueness),
+               data = d_imputed))
+
+#stts _||_ unqn | dpth, rn_2, size
+Anova(multinom(status ~ 
+                 scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+                 scale(uniqueness),
+               data = d_imputed))
+
+#unqn _||_ w_GD | rn_2
+summary(lm(uniqueness ~ 
+             scale(range_km2) + order + family +
+             scale(sum_GDP_bil),
+           data = d_imputed))
+
+#unqn _||_ w_GD | dpth, shap
+summary(lm(uniqueness ~ 
+             scale(min_depth) + scale(max_depth) + shape + order + family +
+             scale(sum_GDP_bil),
+           data = d_imputed))
+
+#unqn _||_ w_GD | cntr, dpth, pttr
+summary(lm(uniqueness ~ 
+             scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+             scale(sum_GDP_bil),
+           data = d_imputed))
+
+#unqn _||_ year | dpth, rn_2, size
+summary(lm(uniqueness ~ 
+             scale(min_depth) + scale(max_depth) + scale(range_km2) + scale(size) + order + family +
+             scale(year),
+           data = d_imputed))
+
+#unqn _||_ year | dpth, shap
+summary(lm(uniqueness ~ 
+             scale(min_depth) + scale(max_depth) + shape + order + family +
+             scale(year),
+           data = d_imputed))
+
+#unqn _||_ year | cntr, dpth, pttr
+summary(lm(uniqueness ~ 
+             scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+             scale(year),
+           data = d_imputed))
+
+eta_squared(lm(uniqueness ~ 
+             scale(chr) + scale(achr) + scale(min_depth) + scale(max_depth) + pattern + order + family +
+             scale(year),
+           data = d_imputed),
+         partial = TRUE)
+```
+
+Everything holds!
+
+
+
+# Analysis!
+
+Now we conduct the analysis to identify causal relationships.
+We will use brm models with phylogenetic/taxonomic random effect structures. We are interested in the "typical species" not the "average species" and so we want to avoid estimates being unduly influenced by extremes - especially when we know we have extremes like the few torpedo rays which receive lot of research that is nothing to do with access or charisma.
+
+As such we will use log1p() transformed papers and gaussian models, with weakly informative priors.
+We will also scale numeric predictors with median and 2*MAD to make them robust to skew (which they are heavily) and roughly comparable to factorial level effects.
+
+We also want to extract standardised effects so we can compare the relative impact of variables on papers (for scale)
+Create a data frame to hold the standardised effect sizes
+
+```{r}
+std.eff <- data.frame()
+```
+
+robustly standardise the numeric variables to facilitate approximate comparison
+
+```{r}
+## create factor to do robust scaling equivalent to standardise(x, robust = TRUE, two_sd = TRUE), this makes factor and variable effects somewhat comparable
+rscale <- function(x) {
+  (x - median(x, na.rm = TRUE)) / (2 * mad(x, na.rm = TRUE))
+}
+```
+
+Set weakly informative priors to use for all models
+
+```{r}
+priors <- c(
+  # Intercept - centred on median log1p(papers) = 1.1
+  # SD of 1.5 allows range from 0 to ~4 on log1p scale
+  prior(normal(1.1, 1.5), class = "Intercept"),
+  
+  # Coefficients - robust Student-t
+  # SD of 1 allows effects up to ~1 SD of outcome
+  prior(student_t(3, 0, 1), class = "b"),
+  
+  # Sigma - centred just below observed SD of 1.33
+  # half-normal truncated at 0
+  prior(normal(0, 1.5), class = "sigma")
+)
+```
+
+## Accessibility
+
+Year
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "year", outcome = "papers")
+
+## model
+m_year <- brm(
+  log1p(papers) ~ rscale(year) +
+    rscale(min_depth) + rscale(max_depth) + rscale(range_km2) + rscale(size) + rscale(sum_GDP_bil) +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A), 
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_year)
+bayes_R2(m_year)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_year) %>%
+                   select(starts_with("b_rscaleyear")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+Geographic Range
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "range_km2", outcome = "papers")
+
+## model
+m_range <- brm(
+  log1p(papers) ~ rscale(range_km2) +
+    rscale(min_depth) + rscale(max_depth) + shape + rscale(size) +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_range)
+bayes_R2(m_range)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_range) %>%
+                   select(starts_with("b_rscalerange_km2")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+GDP
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "sum_GDP_bil", outcome = "papers")
+
+## model
+m_gdp <- brm(
+  log1p(papers) ~ rscale(sum_GDP_bil) +
+    rscale(range_km2) + 
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_gdp)
+bayes_R2(m_gdp)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_gdp) %>%
+                   select(starts_with("b_rscalesum_GDP_bil")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+Minimum & Maximum Depth
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "depth", outcome = "papers")
+
+## model
+m_depth <- brm(
+  log1p(papers) ~ rscale(min_depth) + rscale(max_depth) + 
+    shape + rscale(size) + 
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_depth)
+bayes_R2(m_depth)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_depth) %>%
+                   select(starts_with("b_rscalemin_depth")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale")),
+                 as_draws_df(m_depth) %>%
+                   select(starts_with("b_rscalemax_depth")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+
+## Charisma
+
+Size
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "size", outcome = "papers")
+
+## model
+m_size <- brm(
+  log1p(papers) ~ rscale(size) +
+    shape +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_size)
+bayes_R2(m_size)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_size) %>%
+                   select(starts_with("b_rscalesize")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+Contrast
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "contrast", outcome = "papers")
+
+## model
+m_contrast <- brm(
+  log1p(papers) ~ rscale(chr) + rscale(achr) +
+    rscale(min_depth) + rscale(max_depth) + pattern + shape +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_contrast)
+bayes_R2(m_contrast)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_contrast) %>%
+                   select(starts_with("b_rscalechr")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale")),
+                 as_draws_df(m_contrast) %>%
+                   select(starts_with("b_rscaleachr")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+Visual Uniqueness
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "uniqueness", outcome = "papers")
+
+## model
+m_uniq <- brm(
+  log1p(papers) ~ rscale(uniqueness) +
+    rscale(chr) + rscale(achr) + rscale(min_depth) + rscale(max_depth) + pattern +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_uniq)
+bayes_R2(m_uniq)
+
+## calculate and bind effect size
+std.eff <- rbind(std.eff, 
+                 as_draws_df(m_uniq) %>%
+                   select(starts_with("b_rscaleuniqueness")) %>%
+                   pivot_longer(everything(),
+                                names_to = "Parameter",
+                                values_to = "estimate") %>%
+                   group_by(Parameter) %>%
+                   summarise(
+                     median = median(estimate),
+                     lower95 = quantile(estimate, 0.025),
+                     upper95 = quantile(estimate, 0.975),
+                     lower50 = quantile(estimate, 0.25),
+                     upper50 = quantile(estimate, 0.75)
+                     ) %>%
+                   mutate(Parameter = str_remove(Parameter, "b_rscale"))
+)
+```
+
+Shape
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "shape", outcome = "papers")
+
+## set shape order (do after seeing results)
+d_imputed$shape <- factor(d_imputed$shape, levels = c("Wedge", "Disc", "Spade", "Rhombus", "Diamond"))
+
+## model
+m_shape <- brm(
+  log1p(papers) ~ shape +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_shape)
+bayes_R2(m_shape)
+
+## calculate and bind effect size
+std.eff_shape <- as_draws_df(m_shape) %>%
+  select(b_Intercept, starts_with("b_shape")) %>%
+  pivot_longer(everything(),
+               names_to = "Parameter",
+               values_to = "estimate") %>%
+  group_by(Parameter) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  ) %>%
+  mutate(Parameter = str_remove(Parameter, "b_shape")) %>%
+  mutate(
+    lower95 = ifelse(Parameter == "b_Intercept", lower95 - median, lower95),
+    upper95 = ifelse(Parameter == "b_Intercept", upper95 - median, upper95),
+    lower50 = ifelse(Parameter == "b_Intercept", lower50 - median, lower50),
+    upper50 = ifelse(Parameter == "b_Intercept", upper50 - median, upper50),
+    median  = ifelse(Parameter == "b_Intercept", 0, median),
+    Parameter = ifelse(Parameter == "b_Intercept", "Wedge", Parameter) 
+  )
+
+## pairwise comparison
+# only diamond is different from reference - is it different from others?
+## use model draws so as not to rely on marginal comparisons
+draws_s <- as_draws_df(m_shape)
+
+draws_s <- draws_s %>%
+  mutate(
+    D_vs_W = b_shapeDiamond - b_Intercept,
+    D_vs_D = b_shapeDiamond - b_shapeDisc,
+    D_vs_S = b_shapeDiamond - b_shapeSpade,
+    D_vs_R = b_shapeDiamond - b_shapeRhombus
+  )
+
+# Summarise each contrast
+status_s_pairwise <- draws_s %>%
+  select(D_vs_W:D_vs_R) %>%
+  pivot_longer(everything(), names_to = "contrast", values_to = "estimate") %>%
+  group_by(contrast) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  )
+
+rm(draws_s)
+```
+
+Pattern
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "pattern", outcome = "papers")
+
+## set shape order (do after seeing results)
+d_imputed$pattern <- factor(d_imputed$pattern, levels = c("Lined", "Other", "None", "Mottled", "Spotted"))
+
+## model
+m_pattern <- brm(
+  log1p(papers) ~ pattern +
+    rscale(chr) + rscale(achr) + rscale(min_depth) + rscale(max_depth) + shape +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_pattern)
+bayes_R2(m_pattern)
+
+## calculate and bind effect size
+std.eff_pattern <- as_draws_df(m_pattern) %>%
+  select(b_Intercept, starts_with("b_pattern")) %>%
+  pivot_longer(everything(),
+               names_to = "Parameter",
+               values_to = "estimate") %>%
+  group_by(Parameter) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  ) %>%
+  mutate(Parameter = str_remove(Parameter, "b_pattern")) %>%
+  mutate(
+    lower95 = ifelse(Parameter == "b_Intercept", lower95 - median, lower95),
+    upper95 = ifelse(Parameter == "b_Intercept", upper95 - median, upper95),
+    lower50 = ifelse(Parameter == "b_Intercept", lower50 - median, lower50),
+    upper50 = ifelse(Parameter == "b_Intercept", upper50 - median, upper50),
+    median  = ifelse(Parameter == "b_Intercept", 0, median),
+    Parameter = ifelse(Parameter == "b_Intercept", "Lined", Parameter)
+  )
+
+## no need for pairwise comparison
+```
+
+
+## IUCN Status
+
+IUCN Status
+
+```{r}
+## adjustment set needed
+adjustmentSets(dag, exposure = "status", outcome = "papers")
+
+## set shape order (make CR reference level because this is logical - EX will be dropped becasue n=1)
+d_imputed$status <- factor(d_imputed$status, levels = c("CR", "EN", "VU", "NT", "LC", "DD", "EX"))
+
+## model
+m_status <- brm(
+  log1p(papers) ~ status +
+    rscale(min_depth) + rscale(max_depth) + rscale(range_km2) + rscale(size) + rscale(sum_GDP_bil) + rscale(year) + 
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed %>% dplyr::filter(status != "EX"),
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_status)
+bayes_R2(m_status)
+
+## calculate and bind effect size
+std.eff_status <- as_draws_df(m_status) %>%
+  select(b_Intercept, starts_with("b_status")) %>%
+  pivot_longer(everything(),
+               names_to = "Parameter",
+               values_to = "estimate") %>%
+  group_by(Parameter) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  ) %>%
+  mutate(Parameter = str_remove(Parameter, "b_status")) %>%
+  mutate(
+    lower95 = ifelse(Parameter == "b_Intercept", lower95 - median, lower95),
+    upper95 = ifelse(Parameter == "b_Intercept", upper95 - median, upper95),
+    lower50 = ifelse(Parameter == "b_Intercept", lower50 - median, lower50),
+    upper50 = ifelse(Parameter == "b_Intercept", upper50 - median, upper50),
+    median  = ifelse(Parameter == "b_Intercept", 0, median),
+    Parameter = ifelse(Parameter == "b_Intercept", "CR", Parameter)
+  )
+
+
+## evidence of difference - do pairwise comparisons to look for anything else.
+## use model draws so as not to rely on marginal comparisons
+draws <- as_draws_df(m_status)
+
+# CR is reference so other levels are already vs CR
+draws <- draws %>%
+  mutate(
+    EN_vs_DD = b_statusDD - b_statusEN,
+    EN_vs_LC = b_statusLC - b_statusEN,
+    EN_vs_NT = b_statusNT - b_statusEN,
+    EN_vs_VU = b_statusVU - b_statusEN,
+    VU_vs_DD = b_statusDD - b_statusVU,
+    VU_vs_LC = b_statusLC - b_statusVU,
+    VU_vs_NT = b_statusNT - b_statusVU,
+    NT_vs_LC = b_statusLC - b_statusNT,
+    NT_vs_DD = b_statusDD - b_statusNT,
+    LC_vs_DD = b_statusDD - b_statusLC
+
+  )
+
+# Summarise each contrast
+status_pairwise <- draws %>%
+  select(EN_vs_DD:LC_vs_DD) %>%
+  pivot_longer(everything(), names_to = "contrast", values_to = "estimate") %>%
+  group_by(contrast) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  )
+
+rm(draws)
+```
+
+IUCN Naive for comparison (or joint plotting if possible!)
+
+```{r}
+## model
+m_status_naive <- brm(
+  log1p(papers) ~ status + 
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed %>% dplyr::filter(status != "EX"),
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_status_naive)
+bayes_R2(m_status_naive)
+
+## calculate and bind effect size
+std.eff_status_naive <- as_draws_df(m_status_naive) %>%
+  select(b_Intercept, starts_with("b_status")) %>%
+  pivot_longer(everything(),
+               names_to = "Parameter",
+               values_to = "estimate") %>%
+  group_by(Parameter) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  ) %>%
+  mutate(Parameter = str_remove(Parameter, "b_status")) %>%
+  mutate(
+    lower95 = ifelse(Parameter == "b_Intercept", lower95 - median, lower95),
+    upper95 = ifelse(Parameter == "b_Intercept", upper95 - median, upper95),
+    lower50 = ifelse(Parameter == "b_Intercept", lower50 - median, lower50),
+    upper50 = ifelse(Parameter == "b_Intercept", upper50 - median, upper50),
+    median  = ifelse(Parameter == "b_Intercept", 0, median),
+    Parameter = ifelse(Parameter == "b_Intercept", "CR", Parameter)
+  )
+
+
+## evidence of difference in non-naive model - pairwise comparisons to allow us to draw parallels.
+## use model draws so as not to rely on marginal comparisons
+draws_n <- as_draws_df(m_status_naive)
+
+# CR is reference so other levels are already vs CR
+draws_n <- draws_n %>%
+  mutate(
+    EN_vs_DD = b_statusDD - b_statusEN,
+    EN_vs_LC = b_statusLC - b_statusEN,
+    EN_vs_NT = b_statusNT - b_statusEN,
+    EN_vs_VU = b_statusVU - b_statusEN,
+    VU_vs_DD = b_statusDD - b_statusVU,
+    VU_vs_LC = b_statusLC - b_statusVU,
+    VU_vs_NT = b_statusNT - b_statusVU,
+    NT_vs_LC = b_statusLC - b_statusNT,
+    NT_vs_DD = b_statusDD - b_statusNT,
+    LC_vs_DD = b_statusDD - b_statusLC
+  )
+
+# Summarise each contrast
+status_n_pairwise <- draws_n %>%
+  select(EN_vs_DD:LC_vs_DD) %>%
+  pivot_longer(everything(), names_to = "contrast", values_to = "estimate") %>%
+  group_by(contrast) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  )
+
+rm(draws_n)
+```
+
+
+## Phylogeny Bias
+
+Plot bias in papers across the full phylogeny
+Show a phylogenetic tree with bias in mean number of papers at each taxonomic level.
+
+First calculate that bias
+
+```{r}
+# Log transform first
+d_bias <- d_imputed %>%
+  dplyr::select(c(class:sci_name, papers)) %>%
+  mutate(log_papers = log1p(papers))
+
+# Species level - raw log papers min-max scaled
+d_bias <- d_bias %>%
+  mutate(bias_species = (log_papers - min(log_papers)) / 
+                        (max(log_papers) - min(log_papers)))
+
+# Genus level - mean log papers per genus, then min-max scale
+genus_bias <- d_bias %>%
+  group_by(genus) %>%
+  summarise(mean_log = mean(log_papers)) %>%
+  mutate(bias_genus = (mean_log - min(mean_log)) / 
+                      (max(mean_log) - min(mean_log)))
+
+# Family level
+family_bias <- d_bias %>%
+  group_by(family) %>%
+  summarise(mean_log = mean(log_papers)) %>%
+  mutate(bias_family = (mean_log - min(mean_log)) / 
+                       (max(mean_log) - min(mean_log)))
+
+# Order level
+order_bias <- d_bias %>%
+  group_by(order) %>%
+  summarise(mean_log = mean(log_papers)) %>%
+  mutate(bias_order = (mean_log - min(mean_log)) / 
+                      (max(mean_log) - min(mean_log)))
+
+```
+
+model phylogenetic trends in order
+
+```{r}
+## no adjustment sets needed
+
+## model order
+## set order order (do after seeing results)
+d_imputed$order <- factor(d_imputed$order, levels = c("RAJIFORMES", "RHINOPRISTIFORMES", "MYLIOBATIFORMES",  "TORPEDINIFORMES"))
+
+m_order <- brm(
+  log1p(papers) ~ order, 
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_order)
+bayes_R2(m_order)
+
+## calculate and bind effect size
+std.eff_order <- as_draws_df(m_order) %>%
+  select(b_Intercept, starts_with("b_order")) %>%
+  pivot_longer(everything(),
+               names_to = "Parameter",
+               values_to = "estimate") %>%
+  group_by(Parameter) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  ) %>%
+  mutate(
+    lower95 = ifelse(Parameter == "b_Intercept", lower95 - median, lower95),
+    upper95 = ifelse(Parameter == "b_Intercept", upper95 - median, upper95),
+    lower50 = ifelse(Parameter == "b_Intercept", lower50 - median, lower50),
+    upper50 = ifelse(Parameter == "b_Intercept", upper50 - median, upper50),
+    median  = ifelse(Parameter == "b_Intercept", 0, median),
+    Parameter = ifelse(Parameter == "b_Intercept", "b_orderRAJIFORMES", Parameter)
+  ) %>%
+  mutate(Parameter = str_remove(Parameter, "b_order")) 
+```
+
+model phylogenetic trends in family
+
+```{r}
+## no adjustment sets needed
+
+## model family
+## set family order (do after seeing results) - set the lowest rajiform first, then keep in low-high within order (for later visualisation)
+d_imputed$family <- factor(d_imputed$family, 
+                           levels = c(
+                             ## Rajiformes
+                             "RAJIDAE", "ANACANTHOBATIDAE", "GURGESIELLIDAE", "ARHYNCHOBATIDAE", 
+                             ## Rhinopristiformes
+                             "RHINOBATIDAE", "RHINIDAE", "TRYGONORRHINIDAE", "GLAUCOSTEGIDAE", "PRISTIDAE",
+                             ## Myliobatiformes
+                             "UROLOPHIDAE", "ZANOBATIDAE", "HEXATRYGONIDAE", "PLESIOBATIDAE", 
+                             "POTAMOTRYGONIDAE", "AETOBATIDAE", "UROTRYGONIDAE", "MYLIOBATIDAE", 
+                             "GYMNURIDAE", "DASYATIDAE", "RHINOPTERIDAE", "MOBULIDAE", 
+                             ## Torpediniformes
+                             "NARCINIDAE", "NARKIDAE", "HYPNIDAE", "PLATYRHINIDAE", "TORPEDINIDAE"))
+
+m_family <- brm(
+  log1p(papers) ~ family, 
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed,
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_family)
+bayes_R2(m_family)
+
+## calculate and bind effect size
+std.eff_family <- as_draws_df(m_family) %>%
+  select(b_Intercept, starts_with("b_family")) %>%
+  pivot_longer(everything(),
+               names_to = "Parameter",
+               values_to = "estimate") %>%
+  group_by(Parameter) %>%
+  summarise(
+    median = median(estimate),
+    lower95 = quantile(estimate, 0.025),
+    upper95 = quantile(estimate, 0.975),
+    lower50 = quantile(estimate, 0.25),
+    upper50 = quantile(estimate, 0.75)
+  ) %>%
+  mutate(
+    lower95 = ifelse(Parameter == "b_Intercept", lower95 - median, lower95),
+    upper95 = ifelse(Parameter == "b_Intercept", upper95 - median, upper95),
+    lower50 = ifelse(Parameter == "b_Intercept", lower50 - median, lower50),
+    upper50 = ifelse(Parameter == "b_Intercept", upper50 - median, upper50),
+    median  = ifelse(Parameter == "b_Intercept", 0, median),
+    Parameter = ifelse(Parameter == "b_Intercept", "b_familyRAJIDAE", Parameter) 
+  ) %>%
+  mutate(Parameter = str_remove(Parameter, "b_family")) 
+```
+
+
+
+# Finalise Plotting
+
+## Phylogenetic bias plotting
+
+Phylo effects (tree)
+
+```{r}
+tax_bias <- bind_rows(
+  order_bias  %>% transmute(label = order,    bias = bias_order,  level = "Order",   lwd = 4),
+  family_bias %>% transmute(label = family,   bias = bias_family, level = "Family",  lwd = 3),
+  genus_bias  %>% transmute(label = genus,    bias = bias_genus,  level = "Genus",   lwd = 2),
+  d_bias      %>% transmute(label = sci_name, bias = bias_species,        level = "Species", lwd = 1)
+)
+
+# --- Build a clean taxonomy tree from your data ---
+# Every species will be exactly the same depth from root
+
+tax_paths <- d_bias %>%
+  distinct(class, order, family, genus, sci_name) %>%
+  mutate(path = paste(class, order, family, genus, sci_name, sep = "/")) %>%
+  pull(path)
+
+tree_clean <- as.phylo(~ class/order/family/genus/sci_name, 
+                        data = distinct(d_bias, class, order, family, genus, sci_name),
+                        collapse = FALSE)
+
+tree_clean <- compute.brlen(tree_clean, 1)
+
+p_species <- ggtree(tree_clean, layout = "circular", colour = NA) %<+% tax_bias +
+  geom_tree(aes(colour = bias, linewidth = lwd)) +
+  geom_tiplab(size = 1/.pt, hjust = -0.1) +
+  scale_colour_distiller(
+    palette  = "Reds",
+    direction = 1,        # 1 = light to dark, -1 = dark to light
+    na.value = "grey60",
+    name     = "Research Bias\nWithin\nTaxonomic Level\n(scaled log(Papers+1))",
+    guide     = guide_colourbar(title.hjust = 0.5)
+  ) +
+  scale_linewidth(range = c(0.25, 1.5), guide = "none") +  # tune min/max thickness here
+  theme_tree() +
+  theme(text = element_text(size = 8))
+
+# clean
+rm(tax_bias, tax_paths, tree_clean)
+```
+
+plot for order
+
+```{r}
+p_eff_order <- 
+  ggplot(std.eff_order %>%
+           mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "RAJIFORMES", 0, .))),
+         aes(x = reorder(Parameter, median), y = median)) +
+  geom_pointrange(aes(ymin = lower95, ymax = upper95), linewidth = .5, alpha = 1, fatten = 1) +
+  geom_pointrange(aes(ymin = lower50, ymax = upper50), linewidth = 1, alpha = 1, fatten = 1) +
+  geom_point(size = 1) +
+  scale_size_manual(values = c("TRUE" = 2, "FALSE" = 1), guide = "none") +
+  geom_hline(yintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  geom_vline(xintercept = 1.5, linetype = 1, alpha = .5, colour = "grey50") +
+  geom_vline(xintercept = 2.5, linetype = 1, alpha = .5, colour = "grey50") +
+  geom_vline(xintercept = 3.5, linetype = 1, alpha = .5, colour = "grey50") +
+  scale_x_discrete(position = "top", labels = c("Rajiformes", "Torpediniformes", "Myliobatiformes", "Rhinopristiformes"),
+                   expand = c(0.15, 0)) +
+  scale_y_continuous(limits = c(-0.1,NA)) +
+  labs(y = "Standardised Effect Size", x = "Order") +
+  theme_bw() +
+  theme(text = element_text(size = 8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+plot for family
+
+```{r}
+## other than Rajidae, order within order as least to most researched.
+std.eff_family$Parameter <- factor(std.eff_family$Parameter, 
+                           levels = c(
+                             ## Rajiformes
+                             "RAJIDAE", "GURGESIELLIDAE", "ANACANTHOBATIDAE", "ARHYNCHOBATIDAE", 
+                             ## Torpediniformes
+                             "NARKIDAE", "HYPNIDAE", "NARCINIDAE", "PLATYRHINIDAE", "TORPEDINIDAE",
+                             ## Myliobatiformes
+                             "UROLOPHIDAE", "HEXATRYGONIDAE", "ZANOBATIDAE", "PLESIOBATIDAE", 
+                             "POTAMOTRYGONIDAE", "UROTRYGONIDAE", "DASYATIDAE", "GYMNURIDAE",
+                             "MYLIOBATIDAE", "AETOBATIDAE", "RHINOPTERIDAE", "MOBULIDAE",
+                             ## Rhinopristiformes
+                             "RHINOBATIDAE", "RHINIDAE", "GLAUCOSTEGIDAE", "TRYGONORRHINIDAE", "PRISTIDAE"
+                             )
+                           )
+
+p_eff_family <- 
+  ggplot(std.eff_family %>% 
+           mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "RAJIDAE", 0, .))) %>%
+           mutate(Parameter = factor(str_to_sentence(Parameter), 
+                                     levels = str_to_sentence(levels(Parameter)))), aes(x = Parameter, y = median)) +
+  geom_pointrange(aes(ymin = lower95, ymax = upper95), linewidth = .5, alpha = 1, fatten = 1) +
+  geom_pointrange(aes(ymin = lower50, ymax = upper50), linewidth = 1, alpha = 1, fatten = 1) +
+  geom_point(size = 1) +
+  scale_size_manual(values = c("TRUE" = 2, "FALSE" = 1), guide = "none") +
+  geom_hline(yintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  geom_vline(xintercept = 4.5, linetype = 1, alpha = .5, colour = "grey50") +
+  geom_vline(xintercept = 9.5, linetype = 1, alpha = .5, colour = "grey50") +
+  geom_vline(xintercept = 21.5, linetype = 1, alpha = .5, colour = "grey50") +
+  scale_x_discrete(expand = c(0.025, 0)) +
+  labs(y = "Standardised Effect Size", x = "Family") +
+  theme_bw() +
+  theme(text = element_text(size = 8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+plot together
+
+```{r}
+p_tax_bias <- 
+  ggdraw() +
+  draw_plot(p_species, 
+            x = 0, y = .5, width = 1, height = .5) +
+  draw_plot(plot_grid(p_eff_order + theme(axis.title.y = element_blank()),
+                      p_eff_family + theme(axis.title.y = element_blank()),
+                      ncol = 1, align = "v", rel_heights = c(.5, 1)),
+            x = 0.03, y = 0, width = .97, height = .5) +
+  draw_label("Standardised Effect Size", 
+             size = 8, angle = 90, x = 0.01, y = .29, vjust = 1) +
+  draw_plot_label(label = c("a", "b"), size = 8,
+                  x = c(0.01, .01), y = c(.99, .49)) +
+  draw_line(x = c(0.226, 0.305), y = c(0.3205, 0.3462), colour = "grey50", alpha = .5) +
+  draw_line(x = c(0.398, 0.535), y = c(0.3205, 0.3462), colour = "grey50", alpha = .5) +
+  draw_line(x = c(0.809, 0.764), y = c(0.3205, 0.3462), colour = "grey50", alpha = .5)
+
+#ggsave("Taxa_Bias.jpeg", p_tax_bias, width = 12, height = 16, units = "cm", dpi = 600, bg = "white")
+```
+
+
+## Standardised effect sizes for downstream causal variabels
+
+plot standardised effect sizes for all causal numeric variables
+
+```{r}
+p_eff <- ggplot(std.eff, aes(x = median, y = Parameter, )) +
+  geom_pointrange(aes(xmin = lower95, xmax = upper95), linewidth = .5, alpha = 1, fatten = 1) +
+  geom_pointrange(aes(xmin = lower50, xmax = upper50), linewidth = 1, alpha = 1, fatten = 1) +
+  geom_point(size = 1) +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  scale_y_discrete(labels = c("Achromatic\nContrast", "Chromatic\nContrast", "Maximum\nDepth", "Minimum\nDepth",
+                              "Geographic\nRange", "Maximum\nSize", "GDP", "Colour\nUniqueness", "Year of\nDiscovery")) +
+  scale_x_continuous(limits = c(-2.8, 2.8)) +
+  labs(x = "Standardised Effect Size", title = "Numeric Drivers") +
+  theme_bw() +
+  theme(text = element_text(size = 8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 8))
+```
+
+plot standardised effect sizes for shape
+
+```{r}
+## Wedge is reference level
+p_eff_shape <- ggplot(std.eff_shape %>%
+                        mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "Wedge", 0, .))),
+           aes(x = median, y = reorder(Parameter, -median))) +
+  geom_pointrange(aes(xmin = lower95, xmax = upper95), linewidth = .5, alpha = 1, fatten = 1) +
+  geom_pointrange(aes(xmin = lower50, xmax = upper50), linewidth = 1, alpha = 1, fatten = 1) +
+  geom_point(size = 1) +
+  scale_size_manual(values = c("TRUE" = 2, "FALSE" = 1), guide = "none") +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  scale_y_discrete(position = "right") +
+  scale_x_continuous(limits = c(-2.8, 2.8)) +
+  labs(x = "Standardised Effect Size", title = "Body Shape") +
+  theme_bw() +
+  theme(text = element_text(size = 8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 8))
+```
+
+plot standardised effect sizes for pattern
+
+```{r}
+## Lined is reference level
+p_eff_pattern <- ggplot(std.eff_pattern %>%
+                          mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "Lined", 0, .))),
+           aes(x = median, y = reorder(Parameter, -median))) +
+  geom_pointrange(aes(xmin = lower95, xmax = upper95), linewidth = .5, alpha = 1, fatten = 1) +
+  geom_pointrange(aes(xmin = lower50, xmax = upper50), linewidth = 1, alpha = 1, fatten = 1) +
+  geom_point(size = 1) +
+  scale_size_manual(values = c("TRUE" = 2, "FALSE" = 1), guide = "none") +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  scale_y_discrete(position = "right") +
+  scale_x_continuous(limits = c(-2.8, 2.8)) +
+  labs(x = "Standardised Effect Size", title = "Patterning") +
+  theme_bw() +
+  theme(text = element_text(size = 8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 8))
+```
+
+plot standardised effect sizes for status
+
+```{r}
+std.eff_status <- std.eff_status %>%
+  mutate(Parameter = fct_relevel(Parameter, "CR", "EN", "VU", "NT", "LC", "DD"))
+
+## CR is reference level
+p_eff_status <- ggplot(std.eff_status %>%
+                         mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "CR", 0, .))),
+           aes(x = median, y = Parameter)) +
+  geom_pointrange(aes(xmin = lower95, xmax = upper95, colour = Parameter), linewidth = .5, alpha = 1, fatten = 1) +
+  geom_pointrange(aes(xmin = lower50, xmax = upper50, colour = Parameter), linewidth = 1, alpha = 1, fatten = 1) +
+  geom_point(size = 1, aes(colour = Parameter), shape = 21, fill = "black") +
+  scale_colour_manual(values = c("#D81E05", "#FC7F3F", "#F9E814", "#CCE226", "#60C659", "#D1D1C6")) +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  scale_y_discrete(position = "right") +
+  scale_x_continuous(limits = c(-2.8, 2.8)) +
+  labs(x = "Standardised Effect Size", title = "IUCN Status") +
+  theme_bw() +
+  theme(text = element_text(size = 8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(), 
+        legend.position = "none", 
+        plot.title = element_text(hjust = 0.5, size = 8))
+p_eff_status
+```
+
+
+TEMPORARY
+
+```{r}
+## CR is reference level
+t <- ggplot(std.eff_status %>%
+                         mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "CR", 0, .))),
+           aes(x = median, y = Parameter)) +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  geom_pointrange(aes(xmin = lower95, xmax = upper95, colour = Parameter), linewidth = 2, alpha = 1, fatten = 4) +
+  geom_pointrange(aes(xmin = lower50, xmax = upper50, colour = Parameter), linewidth = 4, alpha = 1, fatten = 4) +
+  geom_point(size = 4, aes(colour = Parameter), shape = 21, fill = "black") +
+  scale_colour_manual(values = c("#D81E05", "#FC7F3F", "#F9E814", "#CCE226", "#60C659", "#D1D1C6")) +
+  
+  scale_y_discrete(position = "left", limits = rev) +
+  scale_x_continuous(limits = c(-.5, 1)) +
+  labs(y = "IUCN Status", x = "Standardised Effect Size") +
+  coord_flip() +
+  theme_bw() +
+  theme(text = element_text(size = 10),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "none", 
+        plot.title = element_text(hjust = 0.5, size = 8))
+t
+#ggsave("IUCN_Effect.jpeg", t, width = 12, height = 12, units = "cm", dpi = 600, bg = "white")
+
+t2 <- ggplot(std.eff_status_naive %>%
+                         mutate(across(c(median, lower95, upper95, lower50, upper50),
+                         ~ if_else(Parameter == "CR", 0, .))) %>%
+               mutate(stats = factor(Parameter, levels = c("CR", "EN", "VU", "NT", "LC", "DD", "EX"))),
+           aes(x = median, y = Parameter)) +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
+  geom_pointrange(aes(xmin = lower95, xmax = upper95, colour = Parameter), linewidth = 2, alpha = 1, fatten = 4) +
+  geom_pointrange(aes(xmin = lower50, xmax = upper50, colour = Parameter), linewidth = 4, alpha = 1, fatten = 4) +
+  geom_point(size = 4, aes(colour = Parameter), shape = 21, fill = "black") +
+  scale_colour_manual(values = c("#D81E05", "#D1D1C6", "#FC7F3F", "#60C659", "#CCE226", "#F9E814")) +
+  scale_y_discrete(position = "left", limits = c("DD", "LC", "NT", "VU", "EN", "CR")) +
+    scale_x_continuous(limits = c(-1.5, 1)) +
+  labs(y = "IUCN Status", x = "Standardised Effect Size") +
+  coord_flip() +
+  theme_bw() +
+  theme(text = element_text(size = 10),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "none", 
+        plot.title = element_text(hjust = 0.5, size = 8))
+t2
+#ggsave("IUCN_Effect_naive.jpeg", t2, width = 12, height = 12, units = "cm", dpi = 600, bg = "white")
+```
+
+
+
+Plot together
+
+```{r}
+p_causal <- ggdraw() +
+  draw_plot(p_eff, 
+            x = 0, y = 0, width = .5, height = 1) +
+  draw_plot(plot_grid(p_eff_shape, p_eff_pattern, p_eff_status,
+                      ncol = 1, rel_heights = c(5, 5, 6), align = "v"), 
+            x = .5, y = 0, width = .5, height = 1) 
+
+#ggsave("Causal_Drivers.jpeg", p_causal, width = 12, height = 12, units = "cm", dpi = 600, bg = "white")
+```
+
+
+
+# Causal Model of Research Output
+
+Curiosity: full causal model - how well does it perform?
+
+```{r}
+m_full_causal <- brm(
+  log1p(papers) ~ 
+    shape + status + pattern +
+    rscale(achr) + rscale(chr) + rscale(uniqueness) + rscale(min_depth) + rscale(max_depth) + rscale(range_km2) +
+    rscale(sum_GDP_bil) + rscale(size) + rscale(year) +
+    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
+  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
+  data = d_imputed %>% dplyr::filter(status != "EX"),
+  data2 = list(A = A),
+  family = gaussian(),
+  prior = priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
+  seed = 1991
+)
+summary(m_full_causal)
+bayes_R2(m_full_causal)
+```
+
+Causal Predictive Model:
+Research Output ~ Body Shape + Colour Contrast + Colour Uniqueness + Conservation Status + Depth + Geographic Range + Gross Domestic Product + Patterning + Maximum Body Size + Year of Description + Taxonomy
+Bayesian R2 = 0.610 95% CI [0.574, 0.643]
+
+
+
+
+# Sensitivity testing
+
+Test sensitivity of the causal relationship to modeled confounders. sensitivity using e-values is on a risk ratio scale. larger values = lower risk. Risk is subject to unmeasured confounders, high risk doesn't mean unreliable model outcomes.
+
+```{r}
+# Function to allow looping across models
+# Takes a brms model and the name of the causal predictor.
+# Returns the E-value table from evalues.OLS().
+evalue_brms <- function(model, predictor) {
+  fe    <- fixef(model, summary = TRUE)
+  beta  <- fe[predictor, "Estimate"]
+  lower <- fe[predictor, "Q2.5"]
+  upper <- fe[predictor, "Q97.5"]
+  sigma <- summary(model)$spec_pars["sigma", "Estimate"]
+
+  d  <- beta / sigma
+  se <- ((upper - lower) / sigma) / (2 * 1.96)
+
+  evalues.OLS(est = d, se = se, sd = 1)
+}
+
+## Apply across models 
+model_specs <- list(
+  ## access
+  list(model = m_year, predictor = "rscaleyear"),
+  list(model = m_range, predictor = "rscalerange_km2"),
+  list(model = m_gdp, predictor = "rscalesum_GDP_bil"),
+  list(model = m_depth, predictor = "rscalemin_depth"),
+  list(model = m_depth, predictor = "rscalemax_depth"),
+  ## charisma
+  list(model = m_size, predictor = "rscalesize"),
+  list(model = m_contrast, predictor = "rscalechr"),
+  list(model = m_contrast, predictor = "rscalechr"),
+  list(model = m_uniq, predictor = "rscaleuniqueness"),
+  list(model = m_shape, predictor = "shapeDisc"),
+  list(model = m_shape, predictor = "shapeSpade"),
+  list(model = m_shape, predictor = "shapeRhombus"),
+  list(model = m_shape, predictor = "shapeDiamond"), 
+  list(model = m_pattern, predictor = "patternOther"),
+  list(model = m_pattern, predictor = "patternNone"), 
+  list(model = m_pattern, predictor = "patternMottled"), 
+  list(model = m_pattern, predictor = "patternSpotted"),
+  ## status
+  list(model = m_status, predictor = "statusEN"),
+  list(model = m_status, predictor = "statusVU"),
+  list(model = m_status, predictor = "statusNT"),
+  list(model = m_status, predictor = "statusLC"),
+  list(model = m_status, predictor = "statusDD")
+  # add as needed
+)
+
+evalue_results <- lapply(model_specs, function(x) {
+  ev <- evalue_brms(x$model, x$predictor)
+  data.frame(
+    predictor = x$predictor,
+    evalue_point = ev["E-values", "point"],
+    evalue_ci    = ev["E-values", "lower"]
+  )
+})
+
+evalue_table <- do.call(rbind, evalue_results)
+evalue_table
+```

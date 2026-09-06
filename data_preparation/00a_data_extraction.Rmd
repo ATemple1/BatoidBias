@@ -1,0 +1,316 @@
+---
+title: "Sophia_DataExtraction"
+author: "Andrew J. Temple"
+date: "6/2/2024"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load packages
+
+```{r}
+## General
+library(tidyverse)
+
+## Data
+library(rredlist)
+#library(rfishbase)
+```
+
+Working Directory
+
+```{r}
+# Set working directory to the repository root before running
+# setwd("path/to/batoid-research-bias")
+```
+
+# Data Extraction from the Red List
+
+## Red Listings
+
+Extract data from the RedList for all batoids
+
+```{r}
+library(iucnredlist)
+api <- init_api("YOUR_IUCN_API_KEY")  # Register at https://apiv4.iucnredlist.org/ to obtain a key
+
+chonds <- assessments_by_taxonomy(api, level = "class", name = "Chondrichthyes", latest = TRUE) %>%
+  filter(scopes_description_en == "Global") %>%
+  distinct()
+
+## extract the assessments
+chonds_iucn <- assessment_data_many(api, assessment_ids = chonds$assessment_id)
+
+## filter to batoids only
+unique(sapply(chonds_iucn, function(x) x$taxon$order_name))
+batoids_iucn <- keep(chonds_iucn, ~ .x$taxon$order_name %in% c("RAJIFORMES", "RHINOPRISTIFORMES", "TORPEDINIFORMES", "MYLIOBATIFORMES"))
+
+## extract species names
+```
+
+
+## General status (sharks vs rays)
+
+```{r}
+status_all <- data.frame()
+
+for(i in 1:length(chonds_iucn)) {
+  
+temp <- data.frame(status = pluck(chonds_iucn[[i]], "red_list_category", "code", .default = NA)) %>%
+  mutate(sci_name = pluck(chonds_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+status_all <- rbind(status_all, temp) 
+
+rm(temp)
+  
+}
+
+write.csv(status_all, "status_all.csv")
+
+## 402 of 1078 assessed species are threatened
+## 229 of 561 assessed ray species are threatened
+```
+
+## Other data
+
+Full taxonomy
+
+```{r}
+taxonomy <- data.frame()
+
+for(i in 1:length(batoids_iucn)) {
+  
+temp <- data.frame(phylum = pluck(batoids_iucn[[i]], "taxon", "phylum_name", .default = NA),
+                   class = pluck(batoids_iucn[[i]], "taxon", "class_name", .default = NA),
+                   order = pluck(batoids_iucn[[i]], "taxon", "order_name", .default = NA),
+                   family = pluck(batoids_iucn[[i]], "taxon", "family_name", .default = NA),
+                   sci_name = pluck(batoids_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+taxonomy <- rbind(taxonomy, temp) 
+
+rm(temp)
+  
+}
+```
+
+Synonyms
+
+```{r}
+synonyms <- data.frame()
+
+for(i in 1:length(batoids_iucn)) {
+  
+temp <- data.frame(genus = pluck(batoids_iucn[[i]], "taxon_synonyms", "genus_name", .default = NA),
+                   species = pluck(batoids_iucn[[i]], "taxon_synonyms", "species_name", .default = NA)) %>%
+  mutate(across(everything(), ~ str_replace_all(., " ", ""))) %>% ## strip any whitespace
+  mutate(sci_name = pluck(batoids_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+synonyms <- rbind(synonyms, temp) 
+
+rm(temp)
+  
+}
+```
+
+IUCN Status
+
+```{r}
+status <- data.frame()
+
+for(i in 1:length(batoids_iucn)) {
+  
+temp <- data.frame(status = pluck(batoids_iucn[[i]], "red_list_category", "code", .default = NA)) %>%
+  mutate(sci_name = pluck(batoids_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+status <- rbind(status, temp) 
+
+rm(temp)
+  
+}
+```
+
+Year of description
+
+```{r}
+## to get the authority and associated year of description we also have to leverage the rredlist package
+## iucnredlist doesn't contain this output for some reason
+## get redlist species assessment ids
+assess_id <- data.frame()
+
+for(i in 1:length(batoids_iucn)) {
+  
+temp <- data.frame(id = pluck(batoids_iucn[[i]], "assessment_id", "value", .default = NA)) %>%
+  mutate(sci_name = pluck(batoids_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+assess_id <- rbind(assess_id, temp) 
+
+rm(temp)
+  
+}
+
+## get assessments through redlist and extract authority
+library(rredlist)
+library(purrr)
+
+t_iucn <- map(assess_id$id, rl_assessment, key = "YOUR_IUCN_API_KEY")
+
+authority <- data.frame()
+
+for(i in 1:length(t_iucn)) {
+  
+temp <- data.frame(auth = pluck(t_iucn[[i]], "taxon", "authority", .default = NA)) %>%
+  mutate(sci_name = pluck(t_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+authority <- rbind(authority, temp) 
+
+rm(temp)
+  
+}
+rm(t_iucn)
+
+## extract year of description from authority
+
+authority <- authority %>%
+  mutate(year = gsub('[[:punct:] ]+',' ', auth)) %>%
+  mutate(year = parse_number(year)) %>%
+  select(c(sci_name, year))
+```
+
+Depth
+
+```{r}
+depth <- data.frame()
+
+for(i in 1:length(batoids_iucn)) {
+  
+temp <- data.frame(min_depth = pluck(batoids_iucn[[i]], "supplementary_info", "upper_depth_limit", .default = NA),
+                   max_depth = pluck(batoids_iucn[[i]], "supplementary_info", "lower_depth_limit", .default = NA)) %>%
+  mutate(sci_name = pluck(batoids_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+depth <- rbind(depth, temp) 
+
+rm(temp)
+  
+}
+
+## first ensure depth min/maxs are the right way around (there are some errors)
+depth <- depth %>%
+  mutate(max_depth = if_else(max_depth >= min_depth, max_depth, min_depth),
+         min_depth = if_else(min_depth <= max_depth, min_depth, max_depth))
+```
+
+Distribution (countries)
+
+```{r}
+distribution <- data.frame()
+
+for(i in 1:length(batoids_iucn)) {
+  
+temp <- data.frame(origin = pluck(batoids_iucn[[i]], "locations", "origin", .default = NA),
+                   description = pluck(batoids_iucn[[i]], "locations", "description", .default = NA),
+                   code = pluck(batoids_iucn[[i]], "locations", "code", .default = NA)) %>%
+  mutate(sci_name = pluck(batoids_iucn[[i]], "taxon", "scientific_name", .default = NA))
+
+distribution <- rbind(distribution, temp) 
+
+rm(temp)
+  
+}
+
+## filter out non-country level locations
+distribution <- distribution <- distribution %>%
+  filter(!str_detect(code, "-"))
+
+## save
+#write.csv(distribution, "rl_distribution.csv", row.names = FALSE)
+```
+
+
+## Combine into data frame
+
+Compile the IUCN data for analysis, save, and remove unneeded datasets
+
+```{r}
+iucn <- taxonomy %>%
+  left_join(status) %>%
+  left_join(depth) %>%
+  left_join(authority)
+
+## save data
+#write.csv(iucn, "IUCN_Data.csv", row.names = FALSE)
+```
+
+
+
+# Other Data 
+
+Countries of occurrence to be extracted through IUCN shapefiles
+Range to be estimates from IUCN shapefiles
+GDP to be extracted based on WB and countries of occurence
+
+
+
+# Search term
+
+create the search term from synonyms (consider com_name too)
+
+```{r}
+## drop rows where synonyms contain non-letter symbols
+synonyms_df <- synonyms %>%
+  filter(is.na(genus) | str_detect(genus, "^[A-Za-z]+$")) %>%
+  filter(is.na(species) | str_detect(species, "^[A-Za-z]+$"))
+
+## pull out the dropped rows, fix them and rebind to the dataf rame
+synonyms_rm <- anti_join(synonyms, synonyms_df) %>%
+  mutate(species = if_else(str_detect(species, "sp"), NA_character_, species),
+         genus   = if_else(str_detect(species, "sp"), NA_character_, genus)) %>%
+  bind_rows(data.frame(genus = c("Trygon", "Taenura", "Trygon", "Rhinobatos", "Myliobatis"),
+                       species = c("henlei", "henlei", "bennettii", "leucorhinchus", "eeltenkee"),
+                       sci_name = c("Potamotrygon henlei", "Potamotrygon henlei", "Hemitrygon bennetti", 
+                                    "Pseudobatos leucorhynchus", "Aetobatus ocellatus"), 
+                       stringsAsFactors = FALSE)) %>%
+  filter(is.na(genus) | str_detect(genus, "^[A-Za-z]+$")) %>%
+  filter(is.na(species) | str_detect(species, "^[A-Za-z]+$"))
+
+synonyms_df <- rbind(synonyms_df, synonyms_rm)
+rm(synonyms_rm)
+
+## combine genus and species and add speech marks
+synonyms_df <- synonyms_df %>%
+  mutate(synonyms = str_c(genus, species, sep = " ")) %>%
+  select(c(sci_name, synonyms)) %>%
+  mutate(sci_name = str_c('"', sci_name, '"')) %>%
+  mutate(synonyms = str_c('"', synonyms, '"'))
+
+## turn them into a single string for each sci_name level, separate with OR
+synonyms_df <- synonyms_df %>%
+  group_by(sci_name) %>%
+  summarise(synonyms = str_c(synonyms, collapse = " OR "), .groups = "drop")
+
+## add in the scientific name to the string
+synonyms_df <- synonyms_df %>%
+  mutate(synonyms = str_c(sci_name, synonyms, sep = " OR ")) %>%
+  mutate(synonyms = ifelse(is.na(synonyms), sci_name, synonyms))
+  
+## save
+#write.csv(synonyms_df, "rl_synonyms.csv", row.names = FALSE)
+```
+
+Now build the terms
+
+```{r}
+## create single string 
+b_search <- synonyms_df %>%
+  select(synonyms) %>%
+  summarise(synonyms = str_c(synonyms, collapse = " OR "), .groups = "drop") %>%
+  pull()
+
+## save
+writeLines(b_search, "b_search.txt")
+```
