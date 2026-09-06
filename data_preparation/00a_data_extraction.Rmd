@@ -1,7 +1,6 @@
 ---
-title: "Sophia_DataExtraction"
-author: "Andrew J. Temple"
-date: "6/2/2024"
+title: "DataExtraction"
+date: "06/09/2026"
 output: html_document
 editor_options: 
   chunk_output_type: console
