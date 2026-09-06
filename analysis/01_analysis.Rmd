@@ -133,7 +133,7 @@ A <- ape::vcv(tax_tree)
 
 ## DAG
 
-Set up the hypothesised DAG. We include colour phenotype as a latent because it controls pattern and contrast and there is no logical ordering of causality between them - though they are certainly correlated.
+Set up the hypothesised DAG.
 
 ```{r}
 dag <- dagitty(
@@ -199,11 +199,9 @@ iCI <- impliedConditionalIndependencies(dag)
 print(impliedConditionalIndependencies(dag))
 ```
 
-These should ideally hold with the data, if not we may need to reconsider the DAG structure
+These should hold with the data.
 
-Test against a correct p-value for multiple comparisons and a standardised effect size threshold of 0.2 (we dont want to include links that are essentially meaningless)
-
-0.05/44 = 0.001136364 = p value threshold under bonferonni
+Test against a correct p-value for multiple comparisons and a standardised effect size threshold of 0.05
 
 ```{r}
 ## use eta_squared(x, partial = TRUE) to get partial R2
@@ -460,19 +458,14 @@ eta_squared(lm(uniqueness ~
          partial = TRUE)
 ```
 
-Everything holds!
+Everything holds
 
 
 
 # Analysis!
 
-Now we conduct the analysis to identify causal relationships.
-We will use brm models with phylogenetic/taxonomic random effect structures. We are interested in the "typical species" not the "average species" and so we want to avoid estimates being unduly influenced by extremes - especially when we know we have extremes like the few torpedo rays which receive lot of research that is nothing to do with access or charisma.
+Now conduct the analysis to identify causal relationships.
 
-As such we will use log1p() transformed papers and gaussian models, with weakly informative priors.
-We will also scale numeric predictors with median and 2*MAD to make them robust to skew (which they are heavily) and roughly comparable to factorial level effects.
-
-We also want to extract standardised effects so we can compare the relative impact of variables on papers (for scale)
 Create a data frame to hold the standardised effect sizes
 
 ```{r}
@@ -875,8 +868,8 @@ std.eff_shape <- as_draws_df(m_shape) %>%
   )
 
 ## pairwise comparison
-# only diamond is different from reference - is it different from others?
-## use model draws so as not to rely on marginal comparisons
+## only diamond is different from reference
+## use model draws for pairwise comparison
 draws_s <- as_draws_df(m_shape)
 
 draws_s <- draws_s %>%
@@ -1008,8 +1001,8 @@ std.eff_status <- as_draws_df(m_status) %>%
   )
 
 
-## evidence of difference - do pairwise comparisons to look for anything else.
-## use model draws so as not to rely on marginal comparisons
+## evidence of difference.
+## use model draws for pairwise comparisons
 draws <- as_draws_df(m_status)
 
 # CR is reference so other levels are already vs CR
@@ -1044,7 +1037,7 @@ status_pairwise <- draws %>%
 rm(draws)
 ```
 
-IUCN Naive for comparison (or joint plotting if possible!)
+IUCN Naive for comparison
 
 ```{r}
 ## model
@@ -1087,8 +1080,8 @@ std.eff_status_naive <- as_draws_df(m_status_naive) %>%
   )
 
 
-## evidence of difference in non-naive model - pairwise comparisons to allow us to draw parallels.
-## use model draws so as not to rely on marginal comparisons
+## evidence of difference in non-naive model.
+## use model draws for pairwise comparisons.
 draws_n <- as_draws_df(m_status_naive)
 
 # CR is reference so other levels are already vs CR
@@ -1283,8 +1276,8 @@ tax_bias <- bind_rows(
   d_bias      %>% transmute(label = sci_name, bias = bias_species,        level = "Species", lwd = 1)
 )
 
-# --- Build a clean taxonomy tree from your data ---
-# Every species will be exactly the same depth from root
+## Build a clean taxonomy tree from data
+## Every species will be exactly the same depth from root
 
 tax_paths <- d_bias %>%
   distinct(class, order, family, genus, sci_name) %>%
@@ -1404,7 +1397,7 @@ p_tax_bias <-
 ```
 
 
-## Standardised effect sizes for downstream causal variabels
+## Standardised effect sizes for downstream causal variables
 
 plot standardised effect sizes for all causal numeric variables
 
@@ -1499,58 +1492,6 @@ p_eff_status <- ggplot(std.eff_status %>%
 p_eff_status
 ```
 
-
-TEMPORARY
-
-```{r}
-## CR is reference level
-t <- ggplot(std.eff_status %>%
-                         mutate(across(c(median, lower95, upper95, lower50, upper50),
-                         ~ if_else(Parameter == "CR", 0, .))),
-           aes(x = median, y = Parameter)) +
-  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
-  geom_pointrange(aes(xmin = lower95, xmax = upper95, colour = Parameter), linewidth = 2, alpha = 1, fatten = 4) +
-  geom_pointrange(aes(xmin = lower50, xmax = upper50, colour = Parameter), linewidth = 4, alpha = 1, fatten = 4) +
-  geom_point(size = 4, aes(colour = Parameter), shape = 21, fill = "black") +
-  scale_colour_manual(values = c("#D81E05", "#FC7F3F", "#F9E814", "#CCE226", "#60C659", "#D1D1C6")) +
-  
-  scale_y_discrete(position = "left", limits = rev) +
-  scale_x_continuous(limits = c(-.5, 1)) +
-  labs(y = "IUCN Status", x = "Standardised Effect Size") +
-  coord_flip() +
-  theme_bw() +
-  theme(text = element_text(size = 10),
-        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-        legend.position = "none", 
-        plot.title = element_text(hjust = 0.5, size = 8))
-t
-#ggsave("IUCN_Effect.jpeg", t, width = 12, height = 12, units = "cm", dpi = 600, bg = "white")
-
-t2 <- ggplot(std.eff_status_naive %>%
-                         mutate(across(c(median, lower95, upper95, lower50, upper50),
-                         ~ if_else(Parameter == "CR", 0, .))) %>%
-               mutate(stats = factor(Parameter, levels = c("CR", "EN", "VU", "NT", "LC", "DD", "EX"))),
-           aes(x = median, y = Parameter)) +
-  geom_vline(xintercept = 0, linetype = 2, alpha = 1, colour = "grey50") +
-  geom_pointrange(aes(xmin = lower95, xmax = upper95, colour = Parameter), linewidth = 2, alpha = 1, fatten = 4) +
-  geom_pointrange(aes(xmin = lower50, xmax = upper50, colour = Parameter), linewidth = 4, alpha = 1, fatten = 4) +
-  geom_point(size = 4, aes(colour = Parameter), shape = 21, fill = "black") +
-  scale_colour_manual(values = c("#D81E05", "#D1D1C6", "#FC7F3F", "#60C659", "#CCE226", "#F9E814")) +
-  scale_y_discrete(position = "left", limits = c("DD", "LC", "NT", "VU", "EN", "CR")) +
-    scale_x_continuous(limits = c(-1.5, 1)) +
-  labs(y = "IUCN Status", x = "Standardised Effect Size") +
-  coord_flip() +
-  theme_bw() +
-  theme(text = element_text(size = 10),
-        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-        legend.position = "none", 
-        plot.title = element_text(hjust = 0.5, size = 8))
-t2
-#ggsave("IUCN_Effect_naive.jpeg", t2, width = 12, height = 12, units = "cm", dpi = 600, bg = "white")
-```
-
-
-
 Plot together
 
 ```{r}
@@ -1566,44 +1507,14 @@ p_causal <- ggdraw() +
 
 
 
-# Causal Model of Research Output
-
-Curiosity: full causal model - how well does it perform?
-
-```{r}
-m_full_causal <- brm(
-  log1p(papers) ~ 
-    shape + status + pattern +
-    rscale(achr) + rscale(chr) + rscale(uniqueness) + rscale(min_depth) + rscale(max_depth) + rscale(range_km2) +
-    rscale(sum_GDP_bil) + rscale(size) + rscale(year) +
-    (1|gr(sci_name, cov = A)),   ## phylogenetic effect
-  chains = 4, cores = 4, iter = 6000, warmup = 4000, threads = threading(3),
-  data = d_imputed %>% dplyr::filter(status != "EX"),
-  data2 = list(A = A),
-  family = gaussian(),
-  prior = priors,
-  control = list(adapt_delta = 0.99, max_treedepth = 15),
-  seed = 1991
-)
-summary(m_full_causal)
-bayes_R2(m_full_causal)
-```
-
-Causal Predictive Model:
-Research Output ~ Body Shape + Colour Contrast + Colour Uniqueness + Conservation Status + Depth + Geographic Range + Gross Domestic Product + Patterning + Maximum Body Size + Year of Description + Taxonomy
-Bayesian R2 = 0.610 95% CI [0.574, 0.643]
-
-
-
-
 # Sensitivity testing
 
-Test sensitivity of the causal relationship to modeled confounders. sensitivity using e-values is on a risk ratio scale. larger values = lower risk. Risk is subject to unmeasured confounders, high risk doesn't mean unreliable model outcomes.
+Test sensitivity of the causal relationship to modeled confounders. Sensitivity using e-values is on a risk ratio scale. larger values = lower risk. Risk is subject to unmeasured confounders, high risk doesn't mean unreliable model outcomes.
 
 ```{r}
-# Function to allow looping across models
-# Takes a brms model and the name of the causal predictor.
-# Returns the E-value table from evalues.OLS().
+## Function to allow looping across models
+## Takes a brms model and the name of the causal predictor.
+## Returns the E-value table from evalues.OLS().
 evalue_brms <- function(model, predictor) {
   fe    <- fixef(model, summary = TRUE)
   beta  <- fe[predictor, "Estimate"]
