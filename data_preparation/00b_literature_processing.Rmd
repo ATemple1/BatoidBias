@@ -1,7 +1,6 @@
 ---
 title: "Combining_Literature"
-author: "Andrew J. Temple"
-date: "3/13/2025"
+date: "06/09/2026"
 output: html_document
 editor_options: 
   chunk_output_type: console
@@ -37,12 +36,12 @@ comb_lit <- comb_lit %>%
   distinct()
 ```
 
-Re-search to double check the returns and also to identify results that were based on Index Keywords - we may or may not want to filter to only those that aren't based on index keywords...
+Re-search to double check the returns and also to identify results that were based on Index Keywords.
 
 ```{r}
 synonyms <- read.csv("rl_synonyms.csv")
 
-## need to change terms to the following format "a|b|c" rather than "a" OR "b" OR "c"
+## change terms to the following format "a|b|c" rather than "a" OR "b" OR "c"
 synonyms_check <- synonyms %>%
   mutate(terms = str_remove_all(synonyms, '"')) %>%
   mutate(terms = str_replace_all(terms, " OR ", "|"))
@@ -63,7 +62,7 @@ synonyms_check <- tolower(synonyms_check)
 
 
 ## check search terms exist in title, abstract or keywords (author and index)
-## We need to run this is parallel otherwise it will take a very long time!
+## Run this is parallel otherwise it will take a very long time.
 num_cores <- detectCores() - 2  # Use available cores minus two
 cl <- makeCluster(num_cores)
 registerDoParallel(cl)
@@ -83,10 +82,6 @@ results <- foreach(i = 1:nrow(comb_lit), .combine = "c", .packages = "stringr") 
 
 ## Assign results back to the data frame
 comb_lit$contains_terms <- results
-
-## We checked the FALSE returns (n = 28)
-## a quick look does suggest they do look like false returns based on our search term
-## they can probably be removed
 
 ## check again to look only title, abstract or author keywords
 comb_lit$contains_terms_TAK <- logical(nrow(comb_lit))  
