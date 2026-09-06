@@ -1,7 +1,6 @@
 ---
-title: "Sophia_Colour"
-author: "Andrew J. Temple"
-date: "6/23/2025"
+title: "Colour"
+date: "06/09/2026"
 output: html_document
 editor_options: 
   chunk_output_type: console
@@ -45,8 +44,6 @@ imgs <- data.frame(file = list.files(
   pattern = "\\.png$", full.names = TRUE))
 imgs$page <- as.numeric(str_extract(basename(imgs$file), "\\d+(?=\\.png$)"))
 ```
-
-## testing phase
 
 recolourise the species and check setting to see what seems most appropriate.
 
@@ -94,28 +91,6 @@ Calculate weighted achromatic and chromatic contrast
 
 ```{r}
 ## Build function to calculate weighted contrast
-#compute_weighted_contrast <- function(contrast_matrix, weights) {
-#  weighted_sum <- 0
-#  weight_total <- 0
-
-#  if (length(color_props) > 1) {
-#  for (i in 1:(length(weights) - 1)) {
-#    for (j in (i + 1):length(weights)) {
-#      weight <- weights[i] * weights[j]
-#      delta <- contrast_matrix[i, j]
-#      weighted_sum <- weighted_sum + (delta * weight)
-#      weight_total <- weight_total + weight
-#    }
-#  }
-#  }
-  
-#  if (weight_total > 0) {
-#    return(weighted_sum / weight_total)
-#  } else {
-#    return(0)
-#  }
-#}
-
 compute_weighted_contrast <- function(contrast_matrix, weights) {
   n <- length(weights)
   if (n == 0) return(0)
