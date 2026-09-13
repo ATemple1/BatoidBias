@@ -1,6 +1,7 @@
 ---
-title: "DataExtraction"
-date: "06/09/2026"
+title: "Sophia_DataExtraction"
+author: "Andrew J. Temple"
+date: "6/2/2024"
 output: html_document
 editor_options: 
   chunk_output_type: console
@@ -19,7 +20,8 @@ library(tidyverse)
 
 ## Data
 library(rredlist)
-#library(rfishbase)
+library(iucnredlist)
+library(purrr)
 ```
 
 Working Directory
@@ -36,7 +38,6 @@ Working Directory
 Extract data from the RedList for all batoids
 
 ```{r}
-library(iucnredlist)
 api <- init_api("YOUR_IUCN_API_KEY")  # Register at https://apiv4.iucnredlist.org/ to obtain a key
 
 chonds <- assessments_by_taxonomy(api, level = "class", name = "Chondrichthyes", latest = TRUE) %>%
@@ -154,8 +155,7 @@ rm(temp)
 }
 
 ## get assessments through redlist and extract authority
-library(rredlist)
-library(purrr)
+
 
 t_iucn <- map(assess_id$id, rl_assessment, key = "YOUR_IUCN_API_KEY")
 
